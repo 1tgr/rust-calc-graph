@@ -1,0 +1,6 @@
+setup took 89µs
+calc took 2µs
+cached 1 took 0µs
+dirty took 0µs
+recalc took 2µs
+cached 2 took 0µs

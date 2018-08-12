@@ -1,0 +1,20 @@
+[package]
+name = "calc-graph"
+version = "0.1.0"
+authors = ["Tim Robinson <tim.g.robinson@gmail.com>"]
+build = "build/build.rs"
+
+[profile.release]
+debug = true
+
+[dependencies]
+bit-set = "0.5"
+either = "1.5"
+take_mut = "0.2"
+
+[build-dependencies]
+itertools = "0.7"
+
+[[bin]]
+name = "demo"
+path = "bin/demo.rs"
