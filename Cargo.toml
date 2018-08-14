@@ -1,7 +1,9 @@
 [package]
 name = "calc-graph"
+description = "Efficient calculations on a graph of values"
 version = "0.1.0"
 authors = ["Tim Robinson <tim.g.robinson@gmail.com>"]
+license = "MIT"
 build = "build/build.rs"
 
 [profile.release]
