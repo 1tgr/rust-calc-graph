@@ -45,8 +45,8 @@ impl<C: Calc> Node<C>
 where
     C::Value: Clone,
 {
-    pub fn get(&mut self) -> C::Value {
-        let mut dirty = self.graph.as_mut().map(|graph| graph.dirty.lock());
+    pub fn get_mut(&mut self) -> C::Value {
+        let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
         let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
         let mut no_dirty = BitSet::new();
         self.calc.eval(dirty.unwrap_or(&mut no_dirty)).1
@@ -74,6 +74,27 @@ impl<C: Calc + Send + 'static> Node<C> {
             calc,
             graph: self.graph,
         }
+    }
+}
+
+impl<C: Calc> SharedNode<C> {
+    pub fn get(&self) -> C::Value {
+        let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
+        let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
+        let mut no_dirty = BitSet::new();
+        self.calc.lock().eval(dirty.unwrap_or(&mut no_dirty)).1
+    }
+}
+
+impl<T: Clone> Node<Const<T>> {
+    pub fn get(&self) -> T {
+        self.calc.0.clone()
+    }
+}
+
+impl<T: Clone> Node<Source<T>> {
+    pub fn get(&self) -> T {
+        self.calc.inner.lock().value.1.clone()
     }
 }
 
@@ -269,12 +290,12 @@ fn test_nodes_are_send() {
         format!("{a} {b} {c}", a = a, b = b, c = c)
     }));
 
-    assert_eq!("const lazy source", m.get());
+    assert_eq!("const lazy source", m.get_mut());
 
     let value = s.get() + "2";
     s.set(value);
 
-    assert_eq!("const lazy source2", m.get());
+    assert_eq!("const lazy source2", m.get_mut());
 }
 
 #[test]
@@ -290,7 +311,7 @@ fn test_source() {
 
 #[test]
 fn test_const() {
-    let mut c = const_("hello");
+    let c = const_("hello");
 
     assert_eq!("hello", c.get());
 }
@@ -300,7 +321,7 @@ fn test_lazy() {
     let mut lazy1 = lazy(|| "hello");
     let _lazy2 = lazy(|| unreachable!());
 
-    assert_eq!("hello", lazy1.get());
+    assert_eq!("hello", lazy1.get_mut());
 }
 
 #[test]
@@ -311,11 +332,11 @@ fn test_map() {
     let map1 = source.clone().zip(c, |n, c| n * c);
     let mut map2 = map1.map(|m| -m);
 
-    assert_eq!(-2, map2.get());
+    assert_eq!(-2, map2.get_mut());
 
     source.set(2);
 
-    assert_eq!(-4, map2.get());
+    assert_eq!(-4, map2.get_mut());
 }
 
 #[test]
@@ -323,61 +344,48 @@ fn test_map_cache() {
     let graph = Graph::new();
     let mut source = graph.source("hello");
     let c = const_::<usize>(1);
-    let calc_count1 = Mutex::new(0);
-    let calc_count2 = Mutex::new(0);
-    let calc_count3 = Mutex::new(0);
+    let calc_count1 = AtomicUsize::new(0);
+    let calc_count2 = AtomicUsize::new(0);
+    let calc_count3 = AtomicUsize::new(0);
+
+    let calc_counts = || {
+        (
+            calc_count1.load(Ordering::SeqCst),
+            calc_count2.load(Ordering::SeqCst),
+            calc_count3.load(Ordering::SeqCst),
+        )
+    };
 
     let map1 = source
         .clone()
         .map(|s| {
-            *calc_count1.lock() += 1;
+            calc_count1.fetch_add(1, Ordering::SeqCst);
             s.len()
         })
         .shared();
 
     let map2 = Node::zip(source.clone(), c, |s, c| {
-        *calc_count2.lock() += 1;
+        calc_count2.fetch_add(1, Ordering::SeqCst);
         s.as_bytes()[c] as usize
     });
 
     let mut map3 = Node::zip3(map1.clone(), map2, map1, |x, y, z| {
-        *calc_count3.lock() += 1;
+        calc_count3.fetch_add(1, Ordering::SeqCst);
         x + y + z
     });
 
-    assert_eq!(111, map3.get());
-    assert_eq!(
-        (1, 1, 1),
-        (
-            *calc_count1.lock(),
-            *calc_count2.lock(),
-            *calc_count3.lock()
-        )
-    );
+    assert_eq!(111, map3.get_mut());
+    assert_eq!((1, 1, 1), calc_counts());
 
     source.set("jello");
 
-    assert_eq!(111, map3.get());
-    assert_eq!(
-        (2, 2, 1),
-        (
-            *calc_count1.lock(),
-            *calc_count2.lock(),
-            *calc_count3.lock()
-        )
-    );
+    assert_eq!(111, map3.get_mut());
+    assert_eq!((2, 2, 1), calc_counts());
 
     source.set("jollo");
 
-    assert_eq!(121, map3.get());
-    assert_eq!(
-        (3, 3, 2),
-        (
-            *calc_count1.lock(),
-            *calc_count2.lock(),
-            *calc_count3.lock()
-        )
-    );
+    assert_eq!(121, map3.get_mut());
+    assert_eq!((3, 3, 2), calc_counts());
 }
 
 #[test]

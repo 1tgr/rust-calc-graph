@@ -91,7 +91,7 @@ impl<C1: Calc> Node<C1> {{
 fn test_{map_zip}_gen() {{
     {declare_const}
     let mut {map_zip} = const1.{map_zip}({const2} |{const_}| {const_add});
-    assert_eq!({const_sum}, {map_zip}.get());
+    assert_eq!({const_sum}, {map_zip}.get_mut());
 }}
         "#,
             i = i,
