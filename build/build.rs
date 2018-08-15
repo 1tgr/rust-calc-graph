@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<Error>> {
         write!(
             file,
             r#"
+/// Calculates a value from {doc_suffix}.
 pub struct Func{i}<{c}, T, F> {{
     f: F,
     value: Option<(usize, T)>,
@@ -55,6 +56,7 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
 }}
 
 impl<C1: Calc> Node<C1> {{
+    /// Returns a new node whose value is calculated from this node{doc2_suffix}.
     pub fn {map_zip}<{c2_calc} T, F: FnMut({c_value}) -> T>(
         self,
         {prec2_arg}
@@ -117,6 +119,15 @@ fn test_{map_zip}_gen() {{
             add_dep = (0..i)
                 .map(|j| format!("self.precs.{j}.add_dep(seen, dep);", j = j))
                 .join("\n"),
+            doc_suffix = match i {
+                1 => "another node".to_owned(),
+                _ => format!("{i} nodes", i = i),
+            },
+            doc2_suffix = match i {
+                1 => "".to_owned(),
+                2 => " and another node".to_owned(),
+                _ => format!(" and {i} other nodes", i = i - 1),
+            },
             map_zip = match i {
                 1 => "map".to_owned(),
                 2 => "zip".to_owned(),

@@ -1,3 +1,44 @@
+#![deny(missing_docs)]
+#![deny(warnings)]
+
+//! Use this crate to split a calculation into related sub-calculations, known as nodes.
+//!
+//! You can push information from outside into one or more source nodes, and you can read results from one or more
+//! output nodes. Values are only calculated as they're needed, and cached as long as their inputs don't change. This
+//! means that recalculations are efficient when you only change some of the inputs, and if you don't request the value
+//! from an output node, its value is never calculated.
+//!
+//! To structure your calculation as a graph:
+//! 1. Create a `Graph` object: `let graph = Graph::new()`.
+//! 2. Define one or more source nodes for your inputs: `let mut source = graph.source(initial_value);`.
+//! 3. Call `Node::map`, `Node::zip` and related methods to define new nodes whose values are calculated from other
+//!     nodes: `let mut output = source.map(|n| n + 1);`.
+//! 4. Read values from the output nodes: `assert_eq!(initial_value + 1, output.get_mut())`.
+//! 5. As needed, push new values into your source nodes (call `source.set(next_value)`) and re-read your output nodes.
+//!
+//! # Sharing
+//! Func nodes (created by `Node::map`, `Node::zip` and related methods) own their inputs (precedent nodes). When you
+//! have a node that acts as an input to two or more func nodes, you need to use `let input_node = input_node.shared()`
+//! first. This shared node can then be used multiple times via `input_node.clone()`.
+//!
+//! You can have multiple `Graph` objects in the same program, but when you define a new node, its precedents must
+//! come from the same graph.
+//!
+//! # Boxing
+//! A `Node` object remembers the full type information of its precedent nodes as well as the closure used to calculate
+//! its value. This means that the name of the `Node` type can be very long, or even impossible to write in the source
+//! code. In this situation you can use `let output_node: BoxNode<i32> = input_node.map(|n| n + 1).boxed();`.
+//!
+//! A call to `boxed()` is also needed if you want a variable that can hold either one or another node; these nodes can
+//! have different concrete types, and calling `boxed()` on each of them gives you a pair of nodes that have the same
+//! type.
+//!
+//! # Threading
+//! `Node<Source>`, `SharedNode` and `BoxedNode` objects are `Send` and `Sync`, meaning they can be passed between
+//! threads. Calculations are performed on the thread that calls `node.get()`; calculations are not parallelised
+//! automatically, although you can read separate output nodes from separate threads, even if they share parts of the
+//! same graph as inputs.
+
 extern crate bit_set;
 extern crate either;
 extern crate parking_lot;
@@ -10,10 +51,42 @@ use bit_set::BitSet;
 use either::Either;
 use parking_lot::Mutex;
 
+/// Calculates a node's value.
 pub trait Calc {
+    /// The type of values calculated by the node.
     type Value;
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, Self::Value);
+
+    /// When this node is used as a precedent, `add_dep` is called by dependent nodes when they are created.
+    ///
+    /// Func nodes forward calls to `add_dep` to their precedents. Source nodes remember their dependencies so that they
+    /// can mark them dirty when the source node changes.
+    ///
+    /// # Arguments
+    /// * `seen` - A `BitSet` that can be used to skip a call to `add_dep` when this node is reachable from a dependency
+    ///     via multiple routes.
+    /// * `dep` - The `usize` id of the dependent node.
     fn add_dep(&mut self, seen: &mut BitSet, dep: usize);
+
+    /// Returns the value held within the node and the version number of the inputs used to calcuate that value.
+    /// The value is recalculated if needed.
+    ///
+    /// To calculate a node as a function of some precedent nodes:
+    /// 1. On creation, each func node is assigned a numerical id. If this id is not contained within the `dirty` bitset,
+    ///     immediately return the cached version number and value. Otherwise, remove this id from the `dirty` bitset.
+    /// 2. Call `eval` on each of the precedent nodes and remember the version number and value returned by each precedent.
+    /// 3. Calculate `version = max(prec1_version, prec2_version, ...)`. If this version is lower than or equal to the
+    ///     cached version number, immediately return the cached version number and value.
+    /// 4. Calculate a new value for this node: `value = f(prec1_value, prec2_value, ...)`. Update the cache with the
+    ///     calculated `version` and the new `value`.
+    /// 5. Return `(version, value.clone())`.
+    ///
+    /// Returns a tuple containing:
+    /// - A `usize` version number indicating the highest version number of this node's precedents
+    /// - A `Clone` of the value calculated
+    ///
+    /// # Arguments
+    /// * `dirty` - A `BitSet` that indicates the nodes that were marked dirty due to an update to a `Node<Source>`.
+    fn eval(&mut self, dirty: &mut BitSet) -> (usize, Self::Value);
 }
 
 struct GraphInner {
@@ -21,12 +94,16 @@ struct GraphInner {
     next_id: AtomicUsize,
 }
 
+/// Represents a value within the graph.
+///
+/// Nodes can calculate their value automatically based on other nondes.
 #[derive(Clone)]
 pub struct Node<C> {
     calc: C,
     graph: Option<Arc<GraphInner>>,
 }
 
+/// Returns a node whose value never changes.
 pub fn const_<T>(value: T) -> Node<Const<T>> {
     Node {
         calc: Const(value),
@@ -34,6 +111,7 @@ pub fn const_<T>(value: T) -> Node<Const<T>> {
     }
 }
 
+/// Returns a node whose value is calculated once on demand and cached.
 pub fn lazy<T, F: FnOnce() -> T>(f: F) -> Node<Lazy<T, F>> {
     Node {
         calc: Lazy(Either::Right(f)),
@@ -45,6 +123,7 @@ impl<C: Calc> Node<C>
 where
     C::Value: Clone,
 {
+    /// Returns the node's value, recalculating it if needed.
     pub fn get_mut(&mut self) -> C::Value {
         let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
         let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
@@ -53,9 +132,11 @@ where
     }
 }
 
+/// A node returned by `Node::shared`.
 pub type SharedNode<C> = Node<Arc<Mutex<C>>>;
 
 impl<C: Calc> Node<C> {
+    /// Wraps this node so that it can be used as an input to two or more dependent nodes.
     pub fn shared(self) -> SharedNode<C> {
         let calc = Arc::new(Mutex::new(self.calc));
         Node {
@@ -65,9 +146,16 @@ impl<C: Calc> Node<C> {
     }
 }
 
+/// A node returned by `Node::boxed`.
 pub type BoxNode<T> = Node<Box<Calc<Value = T> + Send>>;
 
 impl<C: Calc + Send + 'static> Node<C> {
+    /// Wraps this node so that its `Calc` type is hidden.
+    ///
+    /// Boxing is needed when:
+    /// - you need to write the type of the node, but you can't write the name of the concrete `Calc` type (for instance,
+    ///     it's a func node involving a closure)
+    /// - you have a choice of types for a node (for instance, `if a { a_node.boxed() } else { b_node.boxed() }`)
     pub fn boxed(self) -> BoxNode<C::Value> {
         let calc: Box<Calc<Value = C::Value> + Send> = Box::new(self.calc);
         Node {
@@ -78,6 +166,7 @@ impl<C: Calc + Send + 'static> Node<C> {
 }
 
 impl<C: Calc> SharedNode<C> {
+    /// Returns the shared node's value, recalculating it if needed.
     pub fn get(&self) -> C::Value {
         let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
         let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
@@ -87,18 +176,21 @@ impl<C: Calc> SharedNode<C> {
 }
 
 impl<T: Clone> Node<Const<T>> {
+    /// Returns the const node's value.
     pub fn get(&self) -> T {
         self.calc.0.clone()
     }
 }
 
 impl<T: Clone> Node<Source<T>> {
+    /// Returns the source node's value.
     pub fn get(&self) -> T {
         self.calc.inner.lock().value.1.clone()
     }
 }
 
 impl<T> Node<Source<T>> {
+    /// Changes the value held within the source node based on the current value.
     pub fn update(&mut self, updater: impl FnOnce(T) -> T) {
         let version = self.calc.next_version.fetch_add(1, Ordering::SeqCst);
         let mut inner = self.calc.inner.lock();
@@ -115,6 +207,7 @@ impl<T> Node<Source<T>> {
             .union_with(&inner.deps);
     }
 
+    /// Replaces the value held within the source node.
     pub fn set(&mut self, value: T) {
         self.update(move |_| value)
     }
@@ -131,6 +224,7 @@ struct SourceInner<T> {
     deps: BitSet,
 }
 
+/// Holds a value that can be updated directly from outside the graph.
 #[derive(Clone)]
 pub struct Source<T> {
     inner: Arc<Mutex<SourceInner<T>>>,
@@ -140,31 +234,35 @@ pub struct Source<T> {
 impl<T: Clone> Calc for Source<T> {
     type Value = T;
 
-    fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
-        self.inner.lock().value.clone()
-    }
-
     fn add_dep(&mut self, _seen: &mut BitSet, dep: usize) {
         self.inner.lock().deps.insert(dep);
     }
+
+    fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
+        self.inner.lock().value.clone()
+    }
 }
 
+/// Calculates a node's value by returning the same value every time.
 pub struct Const<T>(T);
 
 impl<T: Clone> Calc for Const<T> {
     type Value = T;
 
+    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
+
     fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
         (1, self.0.clone())
     }
-
-    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
 }
 
+/// Calculates a node's value by calling a function on demand and caching the result.
 pub struct Lazy<T, F>(Either<T, F>);
 
 impl<T: Clone, F: FnOnce() -> T> Calc for Lazy<T, F> {
     type Value = T;
+
+    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
 
     fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
         take_mut::take(&mut self.0, |value_or_f| match value_or_f {
@@ -177,8 +275,6 @@ impl<T: Clone, F: FnOnce() -> T> Calc for Lazy<T, F> {
             Either::Right(_) => unreachable!(),
         }
     }
-
-    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
 }
 
 fn eval_func<A, T: Clone + PartialEq>(
@@ -220,30 +316,33 @@ fn eval_func<A, T: Clone + PartialEq>(
     }
 }
 
+/// Implements `Calc` for `SharedNode`.
 impl<C: Calc> Calc for Arc<Mutex<C>> {
     type Value = C::Value;
-
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, C::Value) {
-        self.lock().eval(dirty)
-    }
 
     fn add_dep(&mut self, seen: &mut BitSet, dep: usize) {
         self.lock().add_dep(seen, dep)
     }
+
+    fn eval(&mut self, dirty: &mut BitSet) -> (usize, C::Value) {
+        self.lock().eval(dirty)
+    }
 }
 
+/// Implements `Calc` for `BoxedNode`.
 impl<T> Calc for Box<Calc<Value = T> + Send> {
     type Value = T;
-
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, T) {
-        (**self).eval(dirty)
-    }
 
     fn add_dep(&mut self, seen: &mut BitSet, dep: usize) {
         (**self).add_dep(seen, dep)
     }
+
+    fn eval(&mut self, dirty: &mut BitSet) -> (usize, T) {
+        (**self).eval(dirty)
+    }
 }
 
+/// Returns new `Node<Source>` objects, which act as inputs to the rest of the graph.
 #[derive(Clone)]
 pub struct Graph {
     inner: Arc<GraphInner>,
@@ -251,6 +350,7 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Returns a new `Graph`.
     pub fn new() -> Self {
         Graph {
             inner: Arc::new(GraphInner {
@@ -261,6 +361,7 @@ impl Graph {
         }
     }
 
+    /// Defines a new `Node<Source>` containing an initial value.
     pub fn source<T>(&self, value: T) -> Node<Source<T>> {
         let version = self.next_version.fetch_add(1, Ordering::SeqCst);
 
@@ -284,17 +385,17 @@ impl Graph {
 include!(concat!(env!("OUT_DIR"), "/funcs.rs"));
 
 #[test]
-fn test_nodes_are_send() {
-    fn assert_send<T: Send>(value: T) -> T {
+fn test_nodes_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>(value: T) -> T {
         value
     }
 
-    let graph = assert_send(Graph::new());
+    let graph = assert_send_sync(Graph::new());
     let c = const_("const");
     let l = lazy(|| "lazy");
-    let mut s = assert_send(graph.source("source".to_owned()));
+    let mut s = assert_send_sync(graph.source("source".to_owned()));
 
-    let mut m = assert_send(Node::zip3(c, l, s.clone(), |a, b, c| {
+    let mut m = assert_send_sync(Node::zip3(c, l, s.clone(), |a, b, c| {
         format!("{a} {b} {c}", a = a, b = b, c = c)
     }));
 
@@ -303,7 +404,7 @@ fn test_nodes_are_send() {
     s.update(|mut text| {
         text += "2";
         text
-    } );
+    });
 
     assert_eq!("const lazy source2", m.get_mut());
 }
