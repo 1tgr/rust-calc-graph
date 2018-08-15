@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<Error>> {
             r#"
 pub struct Func{i}<{c}, T, F> {{
     f: F,
-    value: Option<(u64, T)>,
+    value: Option<(usize, T)>,
     id: Option<usize>,
     precs: ({c},),
 }}
@@ -28,7 +28,7 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
 {{
     type Value = T;
 
-    fn eval(&mut self, dirty: &mut BitSet) -> (u64, T) {{
+    fn eval(&mut self, dirty: &mut BitSet) -> (usize, T) {{
         {precs_borrow}
         let f = &mut self.f;
         eval_func(
@@ -54,20 +54,20 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
     }}
 }}
 
-impl<'graph, C1: Calc> Node<'graph, C1> {{
+impl<C1: Calc> Node<C1> {{
     pub fn {map_zip}<{c2_calc} T, F: FnMut({c_value}) -> T>(
         self,
         {prec2_arg}
         f: F,
-    ) -> Node<'graph, Func{i}<{c}, T, F>> {{
+    ) -> Node<Func{i}<{c}, T, F>> {{
         let prec1 = self;
         {prec_destructure}
-        let dirty = None;
-        {prec_dirty}
-        let mut dirty = dirty;
+        let graph = None;
+        {prec_graph}
+        let mut graph = graph;
 
-        let id = dirty.as_mut().map(|dirty| {{
-            let id = alloc_id(&mut dirty.borrow_mut());
+        let id = graph.as_mut().map(|graph| {{
+            let id = alloc_id(&graph);
             let mut seen = BitSet::new();
             seen.reserve_len(id);
             {prec_add_dep}
@@ -81,7 +81,7 @@ impl<'graph, C1: Calc> Node<'graph, C1> {{
                 id,
                 precs: ({prec_calc}),
             }},
-            dirty,
+            graph,
         }}
     }}
 }}
@@ -124,16 +124,16 @@ fn test_{map_zip}_gen() {{
             },
             c2_calc = (2..i + 1).map(|j| format!("C{j}: Calc,", j = j)).join(" "),
             prec2_arg = (2..i + 1)
-                .map(|j| format!("prec{j}: Node<'graph, C{j}>,", j = j))
+                .map(|j| format!("prec{j}: Node<C{j}>,", j = j))
                 .join(" "),
             prec_destructure = (1..i + 1)
                 .map(|j| format!(
-                    "let Node {{ calc: mut prec{j}_calc, dirty: prec{j}_dirty }} = prec{j};",
+                    "let Node {{ calc: mut prec{j}_calc, graph: prec{j}_graph }} = prec{j};",
                     j = j
                 ))
                 .join("\n"),
-            prec_dirty = (1..i + 1)
-                .map(|j| format!("let dirty = dirty.or(prec{j}_dirty);", j = j))
+            prec_graph = (1..i + 1)
+                .map(|j| format!("let graph = graph.or(prec{j}_graph);", j = j))
                 .join("\n"),
             prec_add_dep = (1..i + 1)
                 .map(|j| format!("prec{j}_calc.add_dep(&mut seen, id);", j = j))

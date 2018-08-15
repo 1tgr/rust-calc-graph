@@ -1,7 +1,7 @@
 [package]
 name = "calc-graph"
 description = "Efficient calculations on a graph of values"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Tim Robinson <tim.g.robinson@gmail.com>"]
 license = "MIT"
 build = "build/build.rs"
@@ -11,7 +11,8 @@ debug = true
 
 [dependencies]
 bit-set = "0.5"
-either = "1.5"
+either = "1"
+parking_lot = "0.6"
 take_mut = "0.2"
 
 [build-dependencies]
