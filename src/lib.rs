@@ -8,13 +8,17 @@
 //! means that recalculations are efficient when you only change some of the inputs, and if you don't request the value
 //! from an output node, its value is never calculated.
 //!
-//! To structure your calculation as a graph:
-//! 1. Create a `Graph` object: `let graph = Graph::new()`.
-//! 2. Define one or more source nodes for your inputs: `let mut source = graph.source(initial_value);`.
-//! 3. Call `Node::map`, `Node::zip` and related methods to define new nodes whose values are calculated from other
-//!     nodes: `let mut output = source.map(|n| n + 1);`.
-//! 4. Read values from the output nodes: `assert_eq!(initial_value + 1, output.get_mut())`.
-//! 5. As needed, push new values into your source nodes (call `source.set(next_value)`) and re-read your output nodes.
+//! # Example
+//! ```
+//! use calc_graph::Graph;
+//!
+//! let graph = Graph::new();                       // create a Graph object
+//! let mut source = graph.source(42);              // define one or more nodes for your inputs
+//! let mut output = source.clone().map(|x| x + 1); // build one or more nodes for your outputs
+//! assert_eq!(43, output.get_mut());               // read values from your output nodes
+//! source.set(99);                                 // push new values to the input nodes...
+//! assert_eq!(100, output.get_mut());              // ...and read the output nodes
+//! ```
 //!
 //! # Sharing
 //! Func nodes (created by `Node::map`, `Node::zip` and related methods) own their inputs (precedent nodes). When you
