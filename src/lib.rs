@@ -99,16 +99,24 @@ impl<T: Clone> Node<Source<T>> {
 }
 
 impl<T> Node<Source<T>> {
-    pub fn set(&mut self, value: T) {
+    pub fn update(&mut self, updater: impl FnOnce(T) -> T) {
         let version = self.calc.next_version.fetch_add(1, Ordering::SeqCst);
         let mut inner = self.calc.inner.lock();
-        inner.value = (version, value);
+        take_mut::take(&mut inner.value, move |(_, prev_value)| {
+            let value = updater(prev_value);
+            (version, value)
+        });
+
         self.graph
             .as_ref()
             .unwrap()
             .dirty
             .lock()
             .union_with(&inner.deps);
+    }
+
+    pub fn set(&mut self, value: T) {
+        self.update(move |_| value)
     }
 }
 
@@ -292,8 +300,10 @@ fn test_nodes_are_send() {
 
     assert_eq!("const lazy source", m.get_mut());
 
-    let value = s.get() + "2";
-    s.set(value);
+    s.update(|mut text| {
+        text += "2";
+        text
+    } );
 
     assert_eq!("const lazy source2", m.get_mut());
 }
