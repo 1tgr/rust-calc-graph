@@ -10,20 +10,28 @@
 //!
 //! # Example
 //! ```
-//! use calc_graph::Graph;
-//!
-//! let graph = Graph::new();                       // create a Graph object
-//! let mut source = graph.source(42);              // define one or more nodes for your inputs
-//! let mut output = source.clone().map(|x| x + 1); // build one or more nodes for your outputs
-//! assert_eq!(43, output.get_mut());               // read values from your output nodes
-//! source.set(99);                                 // push new values to the input nodes...
-//! assert_eq!(100, output.get_mut());              // ...and read the output nodes
+//! # use calc_graph::Graph;
+//! let graph = Graph::new();                        // create a Graph object
+//! let mut source = graph.source(42);               // define one or more nodes for your inputs
+//! let mut output = source.clone().map(|x| x + 1);  // build one or more nodes for your outputs
+//! assert_eq!(43, output.get_mut());                // read values from your output nodes
+//! 
+//! source.set(99);                                  // push new values to the input nodes...
+//! assert_eq!(100, output.get_mut());               // ...and read the output nodes
 //! ```
 //!
 //! # Sharing
 //! Func nodes (created by `Node::map`, `Node::zip` and related methods) own their inputs (precedent nodes). When you
-//! have a node that acts as an input to two or more func nodes, you need to use `let input_node = input_node.shared()`
-//! first. This shared node can then be used multiple times via `input_node.clone()`.
+//! have a node that acts as an input to two or more func nodes, you need to use `shared()`
+//! first. You can then use this shared node multiple times via `clone()`:
+//!
+//! ```
+//! let input_node = calc_graph::const_(42).shared();
+//! let mut output1_node = input_node.clone().map(|x| x + 1);
+//! let mut output2_node = input_node.map(|x| x * x);
+//! assert_eq!(43, output1_node.get_mut());
+//! assert_eq!(1764, output2_node.get_mut());
+//! ```
 //!
 //! You can have multiple `Graph` objects in the same program, but when you define a new node, its precedents must
 //! come from the same graph.
@@ -31,7 +39,14 @@
 //! # Boxing
 //! A `Node` object remembers the full type information of its precedent nodes as well as the closure used to calculate
 //! its value. This means that the name of the `Node` type can be very long, or even impossible to write in the source
-//! code. In this situation you can use `let output_node: BoxNode<i32> = input_node.map(|n| n + 1).boxed();`.
+//! code. In this situation you can use:
+//!
+//! ```
+//! # use calc_graph::{BoxNode, Node, Func1};
+//! # let input_node = calc_graph::const_(0);
+//! let func_node: Node<Func1<_, i32, _>> = input_node.map(|x| x + 1);
+//! let output_node: BoxNode<i32> = func_node.boxed();
+//! ```
 //!
 //! A call to `boxed()` is also needed if you want a variable that can hold either one or another node; these nodes can
 //! have different concrete types, and calling `boxed()` on each of them gives you a pair of nodes that have the same
@@ -39,9 +54,33 @@
 //!
 //! # Threading
 //! `Node<Source>`, `SharedNode` and `BoxedNode` objects are `Send` and `Sync`, meaning they can be passed between
-//! threads. Calculations are performed on the thread that calls `node.get()`; calculations are not parallelised
+//! threads. Calculations are performed on the thread that calls `node.get()`. Calculations are not parallelised
 //! automatically, although you can read separate output nodes from separate threads, even if they share parts of the
 //! same graph as inputs.
+//!
+//! ```
+//! # use calc_graph::Graph;
+//! # use std::sync::{Arc, Mutex};
+//! # use std::thread;
+//! let graph = Graph::new();
+//! let input_node = graph.source(41);
+//! let output_node = input_node.clone().map(|x| x * x).shared();
+//! assert_eq!(1681, output_node.get());
+//!
+//! let t = thread::spawn({
+//!     let input_node = input_node.clone();
+//!     let output_node = output_node.clone();
+//!     move || {
+//!         input_node.update(|n| n + 1);
+//!         output_node.get()
+//!     }
+//! });
+//!
+//! assert_eq!(1764, t.join().unwrap());
+//!
+//! input_node.update(|n| n + 1);
+//! assert_eq!(1849, output_node.get());
+//! ```
 
 extern crate bit_set;
 extern crate either;
@@ -195,7 +234,7 @@ impl<T: Clone> Node<Source<T>> {
 
 impl<T> Node<Source<T>> {
     /// Changes the value held within the source node based on the current value.
-    pub fn update(&mut self, updater: impl FnOnce(T) -> T) {
+    pub fn update(&self, updater: impl FnOnce(T) -> T) {
         let version = self.calc.next_version.fetch_add(1, Ordering::SeqCst);
         let mut inner = self.calc.inner.lock();
         take_mut::take(&mut inner.value, move |(_, prev_value)| {
@@ -212,7 +251,7 @@ impl<T> Node<Source<T>> {
     }
 
     /// Replaces the value held within the source node.
-    pub fn set(&mut self, value: T) {
+    pub fn set(&self, value: T) {
         self.update(move |_| value)
     }
 }
@@ -397,7 +436,7 @@ fn test_nodes_are_send_sync() {
     let graph = assert_send_sync(Graph::new());
     let c = const_("const");
     let l = lazy(|| "lazy");
-    let mut s = assert_send_sync(graph.source("source".to_owned()));
+    let s = assert_send_sync(graph.source("source".to_owned()));
 
     let mut m = assert_send_sync(Node::zip3(c, l, s.clone(), |a, b, c| {
         format!("{a} {b} {c}", a = a, b = b, c = c)
@@ -416,7 +455,7 @@ fn test_nodes_are_send_sync() {
 #[test]
 fn test_source() {
     let graph = Graph::new();
-    let mut source = graph.source(1);
+    let source = graph.source(1);
     assert_eq!(1, source.get());
 
     source.set(2);
@@ -442,7 +481,7 @@ fn test_lazy() {
 #[test]
 fn test_map() {
     let graph = Graph::new();
-    let mut source = graph.source(1);
+    let source = graph.source(1);
     let c = const_(2);
     let map1 = source.clone().zip(c, |n, c| n * c);
     let mut map2 = map1.map(|m| -m);
@@ -457,7 +496,7 @@ fn test_map() {
 #[test]
 fn test_map_cache() {
     let graph = Graph::new();
-    let mut source = graph.source("hello");
+    let source = graph.source("hello");
     let c = const_::<usize>(1);
     let calc_count1 = AtomicUsize::new(0);
     let calc_count2 = AtomicUsize::new(0);
@@ -506,7 +545,7 @@ fn test_map_cache() {
 #[test]
 fn test_map_lazy() {
     let graph = Graph::new();
-    let mut source = graph.source(1);
+    let source = graph.source(1);
     let _map = source.clone().map(|_| unreachable!());
 
     assert_eq!(1, source.get());

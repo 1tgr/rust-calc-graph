@@ -48,7 +48,7 @@ fn setup() -> (Node<Source<u64>>, BSNode<u64>, HashMap<i32, BSNode<u64>>) {
 fn main() {
     setup();
 
-    let (mut n1, last, nodes) = timed("setup", || setup());
+    let (n1, last, nodes) = timed("setup", || setup());
 
     assert_eq!(91, nodes.len());
     assert_eq!(2880067194370816120, timed("calc", || last.get()));
