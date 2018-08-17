@@ -15,7 +15,7 @@
 //! let mut source = graph.source(42);               // define one or more nodes for your inputs
 //! let mut output = source.clone().map(|x| x + 1);  // build one or more nodes for your outputs
 //! assert_eq!(43, output.get_mut());                // read values from your output nodes
-//! 
+//!
 //! source.set(99);                                  // push new values to the input nodes...
 //! assert_eq!(100, output.get_mut());               // ...and read the output nodes
 //! ```
@@ -87,6 +87,7 @@ extern crate either;
 extern crate parking_lot;
 extern crate take_mut;
 
+use std::ops::DerefMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -162,16 +163,21 @@ pub fn lazy<T, F: FnOnce() -> T>(f: F) -> Node<Lazy<T, F>> {
     }
 }
 
+fn with_graph<T>(graph: &Option<Arc<GraphInner>>, f: impl FnOnce(&mut BitSet) -> T) -> T {
+    let mut dirty = graph.as_ref().map(|graph| graph.dirty.lock());
+    let dirty = dirty.as_mut().map(DerefMut::deref_mut);
+    let mut no_dirty = BitSet::new();
+    f(dirty.unwrap_or(&mut no_dirty))
+}
+
 impl<C: Calc> Node<C>
 where
     C::Value: Clone,
 {
     /// Returns the node's value, recalculating it if needed.
     pub fn get_mut(&mut self) -> C::Value {
-        let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
-        let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
-        let mut no_dirty = BitSet::new();
-        self.calc.eval(dirty.unwrap_or(&mut no_dirty)).1
+        let calc = &mut self.calc;
+        with_graph(&self.graph, move |dirty| calc.eval(dirty).1)
     }
 }
 
@@ -211,10 +217,7 @@ impl<C: Calc + Send + 'static> Node<C> {
 impl<C: Calc> SharedNode<C> {
     /// Returns the shared node's value, recalculating it if needed.
     pub fn get(&self) -> C::Value {
-        let mut dirty = self.graph.as_ref().map(|graph| graph.dirty.lock());
-        let dirty = dirty.as_mut().map(|r| ::std::ops::DerefMut::deref_mut(r));
-        let mut no_dirty = BitSet::new();
-        self.calc.lock().eval(dirty.unwrap_or(&mut no_dirty)).1
+        with_graph(&self.graph, move |dirty| self.calc.lock().eval(dirty).1)
     }
 }
 
