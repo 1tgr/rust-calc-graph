@@ -323,6 +323,45 @@ impl<T: Clone, F: FnOnce() -> T> Calc for Lazy<T, F> {
     }
 }
 
+/// Provides the opportunity to inspect a node's value without changing it.
+pub struct Inspect<C, F> {
+    f: F,
+    last_version: usize,
+    prec: C,
+}
+
+impl<C: Calc, F: FnMut(&C::Value)> Calc for Inspect<C, F> {
+    type Value = C::Value;
+
+    fn add_dep(&mut self, seen: &mut BitSet<u32>, dep: usize) {
+        self.prec.add_dep(seen, dep)
+    }
+
+    fn eval(&mut self, dirty: &mut BitSet<u32>) -> (usize, C::Value) {
+        let (version, value) = self.prec.eval(dirty);
+        if version > self.last_version {
+            self.last_version = version;
+            (self.f)(&value);
+        }
+
+        (version, value)
+    }
+}
+
+impl<C: Calc> Node<C> {
+    /// Wraps the node with a function, whicih can inspect the node's value each time it is calculated.
+    pub fn inspect<F: FnMut(&C::Value)>(self, f: F) -> Node<Inspect<C, F>> {
+        Node {
+            calc: Inspect {
+                f,
+                last_version: 0,
+                prec: self.calc,
+            },
+            graph: self.graph,
+        }
+    }
+}
+
 fn eval_func<A, T: Clone + PartialEq>(
     dirty: &mut BitSet,
     id: Option<usize>,
@@ -482,6 +521,34 @@ fn test_lazy() {
 }
 
 #[test]
+fn test_inspect() {
+    let graph = Graph::new();
+    let source = graph.source(1);
+    let inspect_count = AtomicUsize::new(0);
+
+    let mut map = source.clone().map(|n| n * n).inspect(|_| {
+        inspect_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert_eq!(0, inspect_count.load(Ordering::SeqCst));
+
+    assert_eq!(1, map.get_mut());
+    assert_eq!(1, inspect_count.load(Ordering::SeqCst));
+
+    source.set(2);
+    assert_eq!(1, inspect_count.load(Ordering::SeqCst));
+
+    assert_eq!(4, map.get_mut());
+    assert_eq!(2, inspect_count.load(Ordering::SeqCst));
+
+    source.set(2);
+    assert_eq!(2, inspect_count.load(Ordering::SeqCst));
+
+    assert_eq!(4, map.get_mut());
+    assert_eq!(2, inspect_count.load(Ordering::SeqCst));
+}
+
+#[test]
 fn test_map() {
     let graph = Graph::new();
     let source = graph.source(1);
@@ -530,6 +597,8 @@ fn test_map_cache() {
         calc_count3.fetch_add(1, Ordering::SeqCst);
         x + y + z
     });
+
+    assert_eq!((0, 0, 0), calc_counts());
 
     assert_eq!(111, map3.get_mut());
     assert_eq!((1, 1, 1), calc_counts());
