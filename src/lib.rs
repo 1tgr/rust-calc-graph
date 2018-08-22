@@ -87,6 +87,7 @@ extern crate either;
 extern crate parking_lot;
 extern crate take_mut;
 
+use std::num::NonZeroUsize;
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -108,8 +109,8 @@ pub trait Calc {
     /// # Arguments
     /// * `seen` - A `BitSet` that can be used to skip a call to `add_dep` when this node is reachable from a dependency
     ///     via multiple routes.
-    /// * `dep` - The `usize` id of the dependent node.
-    fn add_dep(&mut self, seen: &mut BitSet, dep: usize);
+    /// * `dep` - The id of the dependent node.
+    fn add_dep(&mut self, seen: &mut BitSet, dep: NonZeroUsize);
 
     /// Returns the value held within the node and the version number of the inputs used to calcuate that value.
     /// The value is recalculated if needed.
@@ -125,18 +126,35 @@ pub trait Calc {
     /// 5. Return `(version, value.clone())`.
     ///
     /// Returns a tuple containing:
-    /// - A `usize` version number indicating the highest version number of this node's precedents
+    /// - A `NonZeroUsize` version number indicating the highest version number of this node's precedents
     /// - A `Clone` of the value calculated
     ///
     /// # Arguments
     /// * `dirty` - A `BitSet` that indicates the nodes that were marked dirty due to an update to a `Node<Source>`.
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, Self::Value);
+    fn eval(&mut self, dirty: &mut BitSet) -> (NonZeroUsize, Self::Value);
+}
+
+struct Counter(AtomicUsize);
+
+impl Counter {
+    pub fn new(first_value: NonZeroUsize) -> Self {
+        Counter(AtomicUsize::new(first_value.get()))
+    }
+
+    pub fn next(&self) -> NonZeroUsize {
+        let next = self.0.fetch_add(1, Ordering::SeqCst);
+        unsafe { NonZeroUsize::new_unchecked(next) }
+    }
 }
 
 struct GraphInner {
     dirty: Mutex<BitSet>,
-    next_id: AtomicUsize,
+    next_id: Counter,
 }
+
+const CONST_VERSION: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1) };
+const FIRST_VERSION: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(2) };
+const FIRST_ID: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1) };
 
 /// Represents a value within the graph.
 ///
@@ -238,7 +256,7 @@ impl<T: Clone> Node<Source<T>> {
 impl<T> Node<Source<T>> {
     /// Changes the value held within the source node based on the current value.
     pub fn update(&self, updater: impl FnOnce(T) -> T) {
-        let version = self.calc.next_version.fetch_add(1, Ordering::SeqCst);
+        let version = self.calc.next_version.next();
         let mut inner = self.calc.inner.lock();
         take_mut::take(&mut inner.value, move |(_, prev_value)| {
             let value = updater(prev_value);
@@ -259,14 +277,14 @@ impl<T> Node<Source<T>> {
     }
 }
 
-fn alloc_id(graph: &Arc<GraphInner>) -> usize {
-    let id = graph.next_id.fetch_add(1, Ordering::SeqCst);
-    graph.dirty.lock().insert(id);
+fn alloc_id(graph: &Arc<GraphInner>) -> NonZeroUsize {
+    let id = graph.next_id.next();
+    graph.dirty.lock().insert(id.get());
     id
 }
 
 struct SourceInner<T> {
-    value: (usize, T),
+    value: (NonZeroUsize, T),
     deps: BitSet,
 }
 
@@ -274,17 +292,17 @@ struct SourceInner<T> {
 #[derive(Clone)]
 pub struct Source<T> {
     inner: Arc<Mutex<SourceInner<T>>>,
-    next_version: Arc<AtomicUsize>,
+    next_version: Arc<Counter>,
 }
 
 impl<T: Clone> Calc for Source<T> {
     type Value = T;
 
-    fn add_dep(&mut self, _seen: &mut BitSet, dep: usize) {
-        self.inner.lock().deps.insert(dep);
+    fn add_dep(&mut self, _seen: &mut BitSet, dep: NonZeroUsize) {
+        self.inner.lock().deps.insert(dep.get());
     }
 
-    fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
+    fn eval(&mut self, _dirty: &mut BitSet) -> (NonZeroUsize, T) {
         self.inner.lock().value.clone()
     }
 }
@@ -295,10 +313,10 @@ pub struct Const<T>(T);
 impl<T: Clone> Calc for Const<T> {
     type Value = T;
 
-    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
+    fn add_dep(&mut self, _seen: &mut BitSet, _dep: NonZeroUsize) {}
 
-    fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
-        (1, self.0.clone())
+    fn eval(&mut self, _dirty: &mut BitSet) -> (NonZeroUsize, T) {
+        (CONST_VERSION, self.0.clone())
     }
 }
 
@@ -308,16 +326,16 @@ pub struct Lazy<T, F>(Either<T, F>);
 impl<T: Clone, F: FnOnce() -> T> Calc for Lazy<T, F> {
     type Value = T;
 
-    fn add_dep(&mut self, _seen: &mut BitSet, _dep: usize) {}
+    fn add_dep(&mut self, _seen: &mut BitSet, _dep: NonZeroUsize) {}
 
-    fn eval(&mut self, _dirty: &mut BitSet) -> (usize, T) {
+    fn eval(&mut self, _dirty: &mut BitSet) -> (NonZeroUsize, T) {
         take_mut::take(&mut self.0, |value_or_f| match value_or_f {
             Either::Left(value) => Either::Left(value),
             Either::Right(f) => Either::Left(f()),
         });
 
         match &self.0 {
-            Either::Left(value) => (1, value.clone()),
+            Either::Left(value) => (CONST_VERSION, value.clone()),
             Either::Right(_) => unreachable!(),
         }
     }
@@ -333,14 +351,14 @@ pub struct Inspect<C, F> {
 impl<C: Calc, F: FnMut(&C::Value)> Calc for Inspect<C, F> {
     type Value = C::Value;
 
-    fn add_dep(&mut self, seen: &mut BitSet<u32>, dep: usize) {
+    fn add_dep(&mut self, seen: &mut BitSet<u32>, dep: NonZeroUsize) {
         self.prec.add_dep(seen, dep)
     }
 
-    fn eval(&mut self, dirty: &mut BitSet<u32>) -> (usize, C::Value) {
+    fn eval(&mut self, dirty: &mut BitSet<u32>) -> (NonZeroUsize, C::Value) {
         let (version, value) = self.prec.eval(dirty);
-        if version > self.last_version {
-            self.last_version = version;
+        if version.get() > self.last_version {
+            self.last_version = version.get();
             (self.f)(&value);
         }
 
@@ -364,12 +382,13 @@ impl<C: Calc> Node<C> {
 
 fn eval_func<A, T: Clone + PartialEq>(
     dirty: &mut BitSet,
-    id: Option<usize>,
-    value_cell: &mut Option<(usize, T)>,
-    f1: impl FnOnce(&mut BitSet) -> (usize, A),
+    id: Option<NonZeroUsize>,
+    value_cell: &mut Option<(NonZeroUsize, T)>,
+    f1: impl FnOnce(&mut BitSet) -> (NonZeroUsize, A),
     f2: impl FnOnce(A) -> T,
-) -> (usize, T) {
+) -> (NonZeroUsize, T) {
     if let Some(id) = id {
+        let id = id.get();
         if dirty.contains(id) {
             dirty.remove(id);
         } else {
@@ -405,11 +424,11 @@ fn eval_func<A, T: Clone + PartialEq>(
 impl<C: Calc> Calc for Arc<Mutex<C>> {
     type Value = C::Value;
 
-    fn add_dep(&mut self, seen: &mut BitSet, dep: usize) {
+    fn add_dep(&mut self, seen: &mut BitSet, dep: NonZeroUsize) {
         self.lock().add_dep(seen, dep)
     }
 
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, C::Value) {
+    fn eval(&mut self, dirty: &mut BitSet) -> (NonZeroUsize, C::Value) {
         self.lock().eval(dirty)
     }
 }
@@ -418,11 +437,11 @@ impl<C: Calc> Calc for Arc<Mutex<C>> {
 impl<T> Calc for Box<Calc<Value = T> + Send> {
     type Value = T;
 
-    fn add_dep(&mut self, seen: &mut BitSet, dep: usize) {
+    fn add_dep(&mut self, seen: &mut BitSet, dep: NonZeroUsize) {
         (**self).add_dep(seen, dep)
     }
 
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, T) {
+    fn eval(&mut self, dirty: &mut BitSet) -> (NonZeroUsize, T) {
         (**self).eval(dirty)
     }
 }
@@ -431,7 +450,7 @@ impl<T> Calc for Box<Calc<Value = T> + Send> {
 #[derive(Clone)]
 pub struct Graph {
     inner: Arc<GraphInner>,
-    next_version: Arc<AtomicUsize>,
+    next_version: Arc<Counter>,
 }
 
 impl Graph {
@@ -440,15 +459,15 @@ impl Graph {
         Graph {
             inner: Arc::new(GraphInner {
                 dirty: Mutex::new(BitSet::new()),
-                next_id: AtomicUsize::new(1),
+                next_id: Counter::new(FIRST_ID),
             }),
-            next_version: Arc::new(AtomicUsize::new(2)),
+            next_version: Arc::new(Counter::new(FIRST_VERSION)),
         }
     }
 
     /// Defines a new `Node<Source>` containing an initial value.
     pub fn source<T>(&self, value: T) -> Node<Source<T>> {
-        let version = self.next_version.fetch_add(1, Ordering::SeqCst);
+        let version = self.next_version.next();
 
         let inner = SourceInner {
             deps: BitSet::new(),

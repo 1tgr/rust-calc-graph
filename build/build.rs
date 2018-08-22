@@ -19,8 +19,8 @@ fn main() -> Result<(), Box<Error>> {
 /// Calculates a value from {doc_suffix}.
 pub struct Func{i}<{c}, T, F> {{
     f: F,
-    value: Option<(usize, T)>,
-    id: Option<usize>,
+    value: Option<(NonZeroUsize, T)>,
+    id: Option<NonZeroUsize>,
     precs: ({c},),
 }}
 
@@ -29,7 +29,7 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
 {{
     type Value = T;
 
-    fn eval(&mut self, dirty: &mut BitSet) -> (usize, T) {{
+    fn eval(&mut self, dirty: &mut BitSet) -> (NonZeroUsize, T) {{
         {precs_borrow}
         let f = &mut self.f;
         eval_func(
@@ -46,9 +46,9 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
         )
     }}
 
-    fn add_dep(&mut self, seen: &mut BitSet, dep: usize) {{
+    fn add_dep(&mut self, seen: &mut BitSet, dep: NonZeroUsize) {{
         if let Some(id) = self.id {{
-            if seen.insert(id) {{
+            if seen.insert(id.get()) {{
                 {add_dep}
             }}
         }}
@@ -70,8 +70,7 @@ impl<C1: Calc> Node<C1> {{
 
         let id = graph.as_mut().map(|graph| {{
             let id = alloc_id(&graph);
-            let mut seen = BitSet::new();
-            seen.reserve_len(id);
+            let mut seen = BitSet::with_capacity(id.get());
             {prec_add_dep}
             id
         }});
