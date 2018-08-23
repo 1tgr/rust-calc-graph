@@ -71,14 +71,22 @@
 //!     let input_node = input_node.clone();
 //!     let output_node = output_node.clone();
 //!     move || {
-//!         input_node.update(|n| n + 1);
+//!         input_node.update(|n| {
+//!             *n += 1;
+//!             true
+//!         });
+//!
 //!         output_node.get()
 //!     }
 //! });
 //!
 //! assert_eq!(1764, t.join().unwrap());
 //!
-//! input_node.update(|n| n + 1);
+//! input_node.update(|n| {
+//!     *n += 1;
+//!     true
+//! });
+//!
 //! assert_eq!(1849, output_node.get());
 //! ```
 
@@ -249,19 +257,19 @@ impl<T: Clone> Node<Const<T>> {
 impl<T: Clone> Node<Source<T>> {
     /// Returns the source node's value.
     pub fn get(&self) -> T {
-        self.calc.inner.lock().value.1.clone()
+        self.calc.inner.lock().value.clone()
     }
 }
 
 impl<T> Node<Source<T>> {
     /// Changes the value held within the source node based on the current value.
-    pub fn update(&self, updater: impl FnOnce(T) -> T) {
-        let version = self.calc.next_version.next();
+    pub fn update(&self, updater: impl FnOnce(&mut T) -> bool) {
         let mut inner = self.calc.inner.lock();
-        take_mut::take(&mut inner.value, move |(_, prev_value)| {
-            let value = updater(prev_value);
-            (version, value)
-        });
+        if !updater(&mut inner.value) {
+            return;
+        }
+
+        inner.version = self.calc.next_version.next();
 
         self.graph
             .as_ref()
@@ -273,7 +281,10 @@ impl<T> Node<Source<T>> {
 
     /// Replaces the value held within the source node.
     pub fn set(&self, value: T) {
-        self.update(move |_| value)
+        self.update(move |value_cell| {
+            *value_cell = value;
+            true
+        })
     }
 }
 
@@ -284,7 +295,8 @@ fn alloc_id(graph: &Arc<GraphInner>) -> NonZeroUsize {
 }
 
 struct SourceInner<T> {
-    value: (NonZeroUsize, T),
+    version: NonZeroUsize,
+    value: T,
     deps: BitSet,
 }
 
@@ -303,7 +315,8 @@ impl<T: Clone> Calc for Source<T> {
     }
 
     fn eval(&mut self, _dirty: &mut BitSet) -> (NonZeroUsize, T) {
-        self.inner.lock().value.clone()
+        let inner = self.inner.lock();
+        (inner.version, inner.value.clone())
     }
 }
 
@@ -420,6 +433,44 @@ fn eval_func<A, T: Clone + PartialEq>(
     }
 }
 
+fn eval_update<A, T: Clone>(
+    dirty: &mut BitSet,
+    id: Option<NonZeroUsize>,
+    version_cell: &mut Option<NonZeroUsize>,
+    value_cell: &mut T,
+    f1: impl FnOnce(&mut BitSet) -> (NonZeroUsize, A),
+    f2: impl FnOnce(&mut T, A) -> bool,
+) -> (NonZeroUsize, T) {
+    if let Some(id) = id {
+        let id = id.get();
+        if dirty.contains(id) {
+            dirty.remove(id);
+        } else {
+            let version = version_cell.as_ref().unwrap();
+            return (*version, value_cell.clone());
+        }
+    } else if let Some(version) = version_cell.as_ref() {
+        return (*version, value_cell.clone());
+    }
+
+    let (prec_version, precs) = f1(dirty);
+
+    if let Some(version) = version_cell {
+        if prec_version > *version {
+            if f2(value_cell, precs) {
+                *version = prec_version;
+                return (prec_version, value_cell.clone());
+            }
+        }
+
+        (*version, value_cell.clone())
+    } else {
+        f2(value_cell, precs);
+        *version_cell = Some(prec_version);
+        (prec_version, value_cell.clone())
+    }
+}
+
 /// Implements `Calc` for `SharedNode`.
 impl<C: Calc> Calc for Arc<Mutex<C>> {
     type Value = C::Value;
@@ -471,7 +522,8 @@ impl Graph {
 
         let inner = SourceInner {
             deps: BitSet::new(),
-            value: (version, value),
+            version,
+            value,
         };
 
         let calc = Source {
@@ -505,9 +557,9 @@ fn test_nodes_are_send_sync() {
 
     assert_eq!("const lazy source", m.get_mut());
 
-    s.update(|mut text| {
-        text += "2";
-        text
+    s.update(|text| {
+        *text += "2";
+        true
     });
 
     assert_eq!("const lazy source2", m.get_mut());

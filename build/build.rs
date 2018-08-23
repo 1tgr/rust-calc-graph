@@ -19,8 +19,17 @@ fn main() -> Result<(), Box<Error>> {
 /// Calculates a value from {doc_suffix}.
 pub struct Func{i}<{c}, T, F> {{
     f: F,
-    value: Option<(NonZeroUsize, T)>,
     id: Option<NonZeroUsize>,
+    value: Option<(NonZeroUsize, T)>,
+    precs: ({c},),
+}}
+
+/// Calculates a value from the value currently in this node and {doc_suffix}.
+pub struct Update{i}<{c}, T, F> {{
+    f: F,
+    id: Option<NonZeroUsize>,
+    version: Option<NonZeroUsize>,
+    value: T,
     precs: ({c},),
 }}
 
@@ -43,6 +52,38 @@ impl<{c_calc}, T: Clone + PartialEq, F: FnMut({c_value}) -> T> Calc
                 (prec_version, ({value}))
             }},
             |({value})| f({value}),
+        )
+    }}
+
+    fn add_dep(&mut self, seen: &mut BitSet, dep: NonZeroUsize) {{
+        if let Some(id) = self.id {{
+            if seen.insert(id.get()) {{
+                {add_dep}
+            }}
+        }}
+    }}
+}}
+
+impl<{c_calc}, T: Clone, F: FnMut(&mut T, {c_value}) -> bool> Calc
+    for Update{i}<{c}, T, F>
+{{
+    type Value = T;
+
+    fn eval(&mut self, dirty: &mut BitSet) -> (NonZeroUsize, T) {{
+        {precs_borrow}
+        let f = &mut self.f;
+        eval_update(
+            dirty,
+            self.id,
+            &mut self.version,
+            &mut self.value,
+            |dirty| {{
+                {precs_eval}
+                let prec_version = prec0_version;
+                {version_max}
+                (prec_version, ({value}))
+            }},
+            |value_cell, ({value})| f(value_cell, {value}),
         )
     }}
 
@@ -85,6 +126,38 @@ impl<C1: Calc> Node<C1> {{
             graph,
         }}
     }}
+
+    /// Returns a new node whose value is calculated from this node{doc2_suffix}.
+    pub fn {map_zip}_update<{c2_calc} T, F: FnMut(&mut T, {c_value}) -> bool>(
+        self,
+        {prec2_arg}
+        initial_value: T,
+        f: F,
+    ) -> Node<Update{i}<{c}, T, F>> {{
+        let prec1 = self;
+        {prec_destructure}
+        let graph = None;
+        {prec_graph}
+        let mut graph = graph;
+
+        let id = graph.as_mut().map(|graph| {{
+            let id = alloc_id(&graph);
+            let mut seen = BitSet::with_capacity(id.get());
+            {prec_add_dep}
+            id
+        }});
+
+        Node {{
+            calc: Update{i} {{
+                f,
+                id,
+                version: None,
+                value: initial_value,
+                precs: ({prec_calc}),
+            }},
+            graph,
+        }}
+    }}
 }}
 
 #[cfg(test)]
@@ -93,6 +166,18 @@ fn test_{map_zip}_gen() {{
     {declare_const}
     let mut {map_zip} = const1.{map_zip}({const2} |{const_}| {const_add});
     assert_eq!({const_sum}, {map_zip}.get_mut());
+}}
+
+#[cfg(test)]
+#[test]
+fn test_{map_zip}_update_gen() {{
+    {declare_const}
+    let mut {map_zip}_update = const1.{map_zip}_update({const2} -1, |value, {const_}| {{
+        *value = {const_add};
+        true
+    }});
+
+    assert_eq!({const_sum}, {map_zip}_update.get_mut());
 }}
         "#,
             i = i,
