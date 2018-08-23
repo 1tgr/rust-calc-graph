@@ -127,7 +127,8 @@ impl<C1: Calc> Node<C1> {{
         }}
     }}
 
-    /// Returns a new node whose value is calculated from this node{doc2_suffix}.
+    /// Returns a new node whose value is calculated from this node{doc2_suffix}. The `FnMut` that performs the
+    /// calculation can update the value in place.
     pub fn {map_zip}_update<{c2_calc} T, F: FnMut(&mut T, {c_value}) -> bool>(
         self,
         {prec2_arg}

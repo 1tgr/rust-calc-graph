@@ -89,6 +89,47 @@
 //!
 //! assert_eq!(1849, output_node.get());
 //! ```
+//!
+//! # `zip`, `zip_update` and others
+//! Use `zip()`, `map2()` and related functions to create a new node that calculates its value from a `FnMut` provided
+//! by you and the values from one or more other nodes. For large objects, recalculating these nodes can be
+//! inefficient, as your `FnMut` returns a fresh object every time, which is cloned wherever it is needed.
+//!
+//! For more efficiency you can use `zip_update()`, `map2_update()` and related functions. These work the same as their
+//! non-`update` equivalents, except that:
+//! 1. You provide the initial value of the new node when you create it
+//! 2. Your `FnMut` takes a `&mut T` as its first parameter. You update this value in place.
+//! 3. Your `FnMut` returns `true` if it changed value in the `&mut T`, or `false` otherwise. In turn, this determines
+//!     whether dependent nodes are recalculated.
+//!
+//! A useful technique for large objects is to put an `Arc<T>` in the node. When you recalculate the node, use
+//! `Arc::make_mut` to update the object in place where possible and avoid allocating a new `Arc`.
+//!
+//! ```
+//! # use calc_graph::Graph;
+//! # use std::sync::Arc;
+//! # let graph = Graph::new();
+//! let input_node = graph.source(42);
+//!
+//! let mut output_node = input_node.clone().map_update(Arc::new([0; 1024]), |big_array, x| {
+//!     let new_value = x * x;
+//!     let big_array_ref = Arc::make_mut(big_array);
+//!     if big_array_ref[0] == new_value {
+//!         false
+//!     } else {
+//!         big_array_ref[0] = new_value;
+//!         true
+//!     }
+//! });
+//!
+//! assert_eq!(1764, output_node.get_mut()[0]);
+//!
+//! input_node.update(|n| {
+//!     *n += 1;
+//!     true
+//! });
+//!
+//! assert_eq!(1849, output_node.get_mut()[0]);
 
 extern crate bit_set;
 extern crate either;
