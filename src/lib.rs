@@ -305,19 +305,14 @@ impl<T: Clone> Node<Source<T>> {
 impl<T> Node<Source<T>> {
     /// Changes the value held within the source node based on the current value.
     pub fn update(&self, updater: impl FnOnce(&mut T) -> bool) {
+        let mut dirty = self.graph.as_ref().unwrap().dirty.lock();
         let mut inner = self.calc.inner.lock();
         if !updater(&mut inner.value) {
             return;
         }
 
         inner.version = self.calc.next_version.next();
-
-        self.graph
-            .as_ref()
-            .unwrap()
-            .dirty
-            .lock()
-            .union_with(&inner.deps);
+        dirty.union_with(&inner.deps);
     }
 
     /// Replaces the value held within the source node.
