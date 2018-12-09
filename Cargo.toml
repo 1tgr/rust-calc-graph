@@ -1,10 +1,11 @@
 [package]
 name = "calc-graph"
 description = "Efficient calculations on a graph of values"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Tim Robinson <tim.g.robinson@gmail.com>"]
 license = "MIT"
 build = "build/build.rs"
+edition = "2018"
 
 [profile.release]
 debug = true
