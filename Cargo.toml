@@ -13,7 +13,7 @@ debug = true
 [dependencies]
 bit-set = "0.5"
 either = "1"
-parking_lot = "0.6"
+parking_lot = "0.12"
 take_mut = "0.2"
 
 [build-dependencies]
